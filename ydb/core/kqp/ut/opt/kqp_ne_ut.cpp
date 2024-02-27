@@ -204,24 +204,22 @@ Y_UNIT_TEST_SUITE(KqpNewEngine) {
             SELECT * FROM `/Root/Test` WHERE Group = $group AND Name = $name;
         )";
 
-        auto explainResult = session.ExplainDataQuery(query).GetValueSync();
-        UNIT_ASSERT_VALUES_EQUAL_C(explainResult.GetStatus(), EStatus::SUCCESS, explainResult.GetIssues().ToString());
-
-        if (settings.AppConfig.GetTableServiceConfig().GetEnableKqpDataQueryStreamLookup()) {
-            UNIT_ASSERT_C(explainResult.GetAst().Contains("KqpCnStreamLookup"), explainResult.GetAst());
-        } else {
-            UNIT_ASSERT_C(explainResult.GetAst().Contains("KqpLookupTable"), explainResult.GetAst());
-        }
-
         auto params = kikimr.GetTableClient().GetParamsBuilder()
             .AddParam("$group").OptionalUint32(1).Build()
             .AddParam("$name").OptionalString("Paul").Build()
             .Build();
 
+        NYdb::NTable::TExecDataQuerySettings execSettings;
+        execSettings.CollectQueryStats(ECollectQueryStatsMode::Profile);
+
         auto result = session.ExecuteDataQuery(query,
-            TTxControl::BeginTx(TTxSettings::SerializableRW()).CommitTx(), params).ExtractValueSync();
+            TTxControl::BeginTx(TTxSettings::SerializableRW()).CommitTx(), params, execSettings).ExtractValueSync();
         UNIT_ASSERT_VALUES_EQUAL_C(result.GetStatus(), EStatus::SUCCESS, result.GetIssues().ToString());
         CompareYson(R"([[[300u];["None"];[1u];["Paul"]]])", FormatResultSetYson(result.GetResultSet(0)));
+
+        AssertTableStats(result, "/Root/Test", {
+            .ExpectedReads = 1,
+        });
 
         params = kikimr.GetTableClient().GetParamsBuilder()
             .AddParam("$group").OptionalUint32(1).Build()
@@ -3977,6 +3975,82 @@ Y_UNIT_TEST_SUITE(KqpNewEngine) {
         AssertTableReads(result, "/Root/Sample", NewPredicateExtract ? 2 : 4);
         CompareYson(R"([[[1u];[2u]];[[2u];[2u]]])", FormatResultSetYson(result.GetResultSet(0)));
     }
+
+
+    Y_UNIT_TEST(FullScanCount) {
+        TKikimrSettings settings;
+        NKikimrConfig::TAppConfig appConfig;
+        appConfig.MutableTableServiceConfig()->SetExtractPredicateRangesLimit(4);
+        settings.SetAppConfig(appConfig);
+
+        TKikimrRunner kikimr(settings);
+        auto db = kikimr.GetTableClient();
+        auto session = db.CreateSession().GetValueSync().GetSession();
+
+        NKqp::TKqpCounters counters(kikimr.GetTestServer().GetRuntime()->GetAppData().Counters);
+
+        {
+            TAtomicBase before = counters.FullScansExecuted->GetAtomic();
+            auto result = session.ExecuteDataQuery(R"(
+                SELECT * FROM `/Root/EightShard` WHERE Key > 202 AND Key < 404 ORDER BY Key;
+            )", TTxControl::BeginTx(TTxSettings::SerializableRW()).CommitTx()).ExtractValueSync();
+            result.GetIssues().PrintTo(Cerr);
+            AssertSuccessResult(result);
+            UNIT_ASSERT_EQUAL(before, counters.FullScansExecuted->GetAtomic());
+        }
+
+        {
+            TAtomicBase before = counters.FullScansExecuted->GetAtomic();
+            auto result = session.ExecuteDataQuery(R"(
+                SELECT COUNT(*) FROM `/Root/EightShard`;
+            )", TTxControl::BeginTx(TTxSettings::SerializableRW()).CommitTx()).ExtractValueSync();
+            result.GetIssues().PrintTo(Cerr);
+            AssertSuccessResult(result);
+            UNIT_ASSERT_GT(counters.FullScansExecuted->GetAtomic(), before);
+        }
+
+
+        {
+            auto req = R"(
+                DECLARE $items AS List<Uint64>;
+                SELECT Key FROM `/Root/EightShard` where Key in $items;
+            )";
+
+            auto params1 = TParamsBuilder() 
+                .AddParam("$items")
+                .BeginList()
+                    .AddListItem().Uint64(0)
+                .EndList()
+                .Build()
+                .Build();
+
+            TAtomicBase before = counters.FullScansExecuted->GetAtomic();
+            auto result = session.ExecuteDataQuery(req, TTxControl::BeginTx(TTxSettings::SerializableRW()).CommitTx(), params1).ExtractValueSync();
+            result.GetIssues().PrintTo(Cerr);
+            AssertSuccessResult(result);
+            UNIT_ASSERT_EQUAL(counters.FullScansExecuted->GetAtomic(), before);
+
+            auto params2 = TParamsBuilder() 
+                .AddParam("$items")
+                .BeginList()
+                    .AddListItem().Uint64(0)
+                    .AddListItem().Uint64(1)
+                    .AddListItem().Uint64(2)
+                    .AddListItem().Uint64(3)
+                    .AddListItem().Uint64(4)
+                    .AddListItem().Uint64(5)
+                .EndList()
+                .Build()
+                .Build();
+            before = counters.FullScansExecuted->GetAtomic();
+            auto result2 = session.ExecuteDataQuery(req, TTxControl::BeginTx(TTxSettings::SerializableRW()).CommitTx(), params2).ExtractValueSync();
+            result2.GetIssues().PrintTo(Cerr);
+            AssertSuccessResult(result);
+            UNIT_ASSERT_GT(counters.FullScansExecuted->GetAtomic(), before);
+        }
+    }
+
+
 
 }
 

@@ -119,6 +119,50 @@ Y_UNIT_TEST(BuildOptimizerTree2TablesComplexLabel) {
     UNIT_ASSERT_VALUES_EQUAL(right->Stats->Nrows, 10000);
 }
 
+Y_UNIT_TEST(BuildYtJoinTree2Tables) {
+    TExprContext exprCtx;
+    auto tree = MakeOp({"c", "c_nationkey"}, {"n", "n_nationkey"}, {"c", "n"}, exprCtx);
+    tree->Left = MakeLeaf({"c"}, {"c"},  100000, 12333, exprCtx);
+    tree->Right = MakeLeaf({"n"}, {"n"}, 1000, 1233, exprCtx);
+
+    std::shared_ptr<IBaseOptimizerNode> resultTree;
+    std::shared_ptr<IProviderContext> resultCtx;
+    BuildOptimizerJoinTree(resultTree, resultCtx, tree);
+
+    auto joinTree = BuildYtJoinTree(resultTree, exprCtx, {});
+
+    UNIT_ASSERT(AreSimilarTrees(joinTree, tree));
+}
+
+Y_UNIT_TEST(BuildYtJoinTree2TablesComplexLabel) {
+    TExprContext exprCtx;
+    auto tree = MakeOp({"c", "c_nationkey"}, {"n", "n_nationkey"}, {"c", "n", "e"}, exprCtx);
+    tree->Left = MakeLeaf({"c"}, {"c"}, 1000000, 1233333, exprCtx);
+    tree->Right = MakeLeaf({"n"}, {"n", "e"}, 10000, 12333, exprCtx);
+
+    std::shared_ptr<IBaseOptimizerNode> resultTree;
+    std::shared_ptr<IProviderContext> resultCtx;
+    BuildOptimizerJoinTree(resultTree, resultCtx, tree);
+    auto joinTree = BuildYtJoinTree(resultTree, exprCtx, {});
+
+    UNIT_ASSERT(AreSimilarTrees(joinTree, tree));
+}
+
+Y_UNIT_TEST(BuildYtJoinTree2TablesTableIn2Rels)
+{
+    TExprContext exprCtx;
+    auto tree = MakeOp({"c", "c_nationkey"}, {"n", "n_nationkey"}, {"c", "n", "c"}, exprCtx);
+    tree->Left = MakeLeaf({"c"}, {"c"}, 1000000, 1233333, exprCtx);
+    tree->Right = MakeLeaf({"n"}, {"n", "c"}, 10000, 12333, exprCtx);
+
+    std::shared_ptr<IBaseOptimizerNode> resultTree;
+    std::shared_ptr<IProviderContext> resultCtx;
+    BuildOptimizerJoinTree(resultTree, resultCtx, tree);
+    auto joinTree = BuildYtJoinTree(resultTree, exprCtx, {});
+
+    UNIT_ASSERT(AreSimilarTrees(joinTree, tree));
+}
+
 #define ADD_TEST(Name) \
     Y_UNIT_TEST(Name ## _PG) { \
         Name(ECostBasedOptimizerType::PG); \
@@ -126,7 +170,6 @@ Y_UNIT_TEST(BuildOptimizerTree2TablesComplexLabel) {
     Y_UNIT_TEST(Name ## _Native) { \
         Name(ECostBasedOptimizerType::Native); \
     }
-
 
 void OrderJoins2Tables(auto optimizerType) {
     TExprContext exprCtx;
@@ -212,7 +255,39 @@ Y_UNIT_TEST(UnsupportedJoin)
     auto tree = MakeOp({"c", "c_nationkey"}, {"n", "n_nationkey"}, {"c", "n"}, exprCtx);
     tree->Left = MakeLeaf({"c"}, {"c"}, 1000000, 1233333, exprCtx);
     tree->Right = MakeLeaf({"n"}, {"n"}, 10000, 12333, exprCtx);
-    tree->JoinKind = exprCtx.NewAtom(exprCtx.AppendPosition({}), "Full");
+    tree->JoinKind = exprCtx.NewAtom(exprCtx.AppendPosition({}), "RightSemi");
+
+    TTypeAnnotationContext typeCtx;
+    TYtState::TPtr state = MakeIntrusive<TYtState>();
+    typeCtx.CostBasedOptimizer = ECostBasedOptimizerType::PG;
+    state->Types = &typeCtx;
+    auto optimizedTree = OrderJoins(tree, state, exprCtx, true);
+    UNIT_ASSERT(optimizedTree == tree);
+}
+
+Y_UNIT_TEST(OrderJoinSinglePass) {
+    TExprContext exprCtx;
+    auto tree = MakeOp({"c", "c_nationkey"}, {"n", "n_nationkey"}, {"c", "n"}, exprCtx);
+    tree->Left = MakeLeaf({"c"}, {"c"}, 1000000, 1233333, exprCtx);
+    tree->Right = MakeLeaf({"n"}, {"n"}, 10000, 12333, exprCtx);
+    tree->JoinKind = exprCtx.NewAtom(exprCtx.AppendPosition({}), "Left");
+
+    TTypeAnnotationContext typeCtx;
+    TYtState::TPtr state = MakeIntrusive<TYtState>();
+    typeCtx.CostBasedOptimizer = ECostBasedOptimizerType::PG;
+    state->Types = &typeCtx;
+    auto optimizedTree = OrderJoins(tree, state, exprCtx, true);
+    UNIT_ASSERT(optimizedTree != tree);
+    UNIT_ASSERT(optimizedTree->CostBasedOptPassed);
+}
+
+Y_UNIT_TEST(OrderJoinsDoesNothingWhenCBOAlreadyPassed) {
+    TExprContext exprCtx;
+    auto tree = MakeOp({"c", "c_nationkey"}, {"n", "n_nationkey"}, {"c", "n"}, exprCtx);
+    tree->Left = MakeLeaf({"c"}, {"c"}, 1000000, 1233333, exprCtx);
+    tree->Right = MakeLeaf({"n"}, {"n"}, 10000, 12333, exprCtx);
+    tree->JoinKind = exprCtx.NewAtom(exprCtx.AppendPosition({}), "Left");
+    tree->CostBasedOptPassed = true;
 
     TTypeAnnotationContext typeCtx;
     TYtState::TPtr state = MakeIntrusive<TYtState>();

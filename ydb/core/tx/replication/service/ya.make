@@ -22,10 +22,14 @@ SRCS(
     worker.cpp
 )
 
+GENERATE_ENUM_SERIALIZATION(worker.h)
+
 YQL_LAST_ABI_VERSION()
 
 END()
 
 RECURSE_FOR_TESTS(
-    ut
+    ut_table_writer
+    ut_topic_reader
+    ut_worker
 )
